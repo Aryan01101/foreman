@@ -1,0 +1,22 @@
+{
+  "name": "foreman",
+  "version": "0.1.0",
+  "description": "Orchestrate coding tasks to a local SLM with independent verification",
+  "trigger_keywords": [
+    "delegate",
+    "dispatch task",
+    "local slm",
+    "foreman",
+    "routine task",
+    "parallelize"
+  ],
+  "requires_mcp": true,
+  "mcp_server": "foreman",
+  "tools": [
+    "dispatch_task",
+    "check_status",
+    "get_report"
+  ],
+  "author": "Foreman Project",
+  "license": "MIT"
+}
