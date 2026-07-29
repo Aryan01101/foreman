@@ -2,13 +2,15 @@
 
 import asyncio
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from .task_manager import TaskManager
 from .models import TaskDispatch, TaskReport, TaskStatus, TaskVerdict
+from .executor import TaskExecutor
+from .serving import create_backend, ServingBackend
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +24,21 @@ class ForemanServer:
         """Initialize the Foreman server."""
         self.server = Server("foreman")
         self.task_manager = TaskManager()
+        self.backend: Optional[ServingBackend] = None
+        self.executor: Optional[TaskExecutor] = None
         self._setup_handlers()
+
+    async def initialize_backend(self):
+        """Initialize the serving backend and executor."""
+        logger.info("Initializing serving backend...")
+        self.backend = await create_backend()
+
+        if self.backend is None:
+            logger.error("Failed to initialize any backend!")
+            raise RuntimeError("No serving backend available")
+
+        self.executor = TaskExecutor(self.backend)
+        logger.info(f"Backend initialized: {self.backend.name}")
 
     def _setup_handlers(self):
         """Set up MCP server handlers."""
@@ -140,14 +156,27 @@ class ForemanServer:
 
             logger.info(f"Task {task.task_id} dispatched: {dispatch.objective}")
 
-            # TODO: Actually dispatch to SLM (placeholder for now)
-            # For MVP, we'll just queue it
+            # Check if executor is initialized
+            if self.executor is None:
+                logger.error("Executor not initialized - backend may have failed to start")
+                self.task_manager.update_task_status(task.task_id, TaskStatus.FAILED)
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Error: Backend not initialized. Please check server logs."
+                    )
+                ]
+
+            # Mark as queued initially
             self.task_manager.update_task_status(task.task_id, TaskStatus.QUEUED)
+
+            # Execute task asynchronously in background
+            asyncio.create_task(self._execute_task_async(task.task_id, dispatch))
 
             return [
                 TextContent(
                     type="text",
-                    text=f"Task dispatched successfully.\n\nTask ID: {task.task_id}\nStatus: {task.status}\n\nThe task has been queued for processing by the local SLM."
+                    text=f"Task dispatched successfully.\n\nTask ID: {task.task_id}\nStatus: queued\n\nThe task is being processed by the local SLM. Use check_status to monitor progress."
                 )
             ]
 
@@ -159,6 +188,39 @@ class ForemanServer:
                     text=f"Error dispatching task: {str(e)}"
                 )
             ]
+
+    async def _execute_task_async(self, task_id: str, dispatch: TaskDispatch):
+        """
+        Execute a task asynchronously in the background.
+
+        Args:
+            task_id: Task ID
+            dispatch: Task dispatch message
+        """
+        try:
+            # Update status to running
+            self.task_manager.update_task_status(task_id, TaskStatus.RUNNING)
+            logger.info(f"Task {task_id} started execution")
+
+            # Execute the task
+            report = await self.executor.execute_task(dispatch)
+
+            # Update task with report
+            self.task_manager.update_task_report(task_id, report)
+            self.task_manager.update_task_status(task_id, report.status)
+
+            logger.info(f"Task {task_id} completed with status: {report.status}")
+
+        except Exception as e:
+            logger.error(f"Error executing task {task_id}: {e}")
+            # Create error report
+            error_report = TaskReport(
+                task_id=task_id,
+                status=TaskStatus.FAILED,
+                error=str(e)
+            )
+            self.task_manager.update_task_report(task_id, error_report)
+            self.task_manager.update_task_status(task_id, TaskStatus.FAILED)
 
     async def _check_status(self, arguments: Dict[str, Any]) -> list[TextContent]:
         """
@@ -247,6 +309,22 @@ class ForemanServer:
         report_text = f"Task ID: {task.task_id}\n"
         report_text += f"Status: {task.report.status}\n\n"
 
+        # Check for cooperative decomposition
+        if task.report.status == TaskStatus.NEEDS_DECOMPOSITION:
+            if task.report.decomposition_reasoning:
+                report_text += f"Decomposition Reasoning:\n{task.report.decomposition_reasoning}\n\n"
+
+            if task.report.suggested_subtasks:
+                report_text += f"Suggested Subtasks ({len(task.report.suggested_subtasks)}):\n"
+                for i, subtask in enumerate(task.report.suggested_subtasks, 1):
+                    report_text += f"\n{i}. {subtask.objective}\n"
+                    report_text += f"   Complexity: {subtask.estimated_complexity or 'unknown'}\n"
+                    report_text += f"   Rationale: {subtask.rationale}\n"
+                    if subtask.requires:
+                        report_text += f"   Requires: {', '.join(subtask.requires)}\n"
+                    report_text += f"   Scope: {len(subtask.scope.get('editable', []))} editable files\n"
+                report_text += "\n"
+
         if task.report.diff:
             report_text += f"Diff:\n{task.report.diff}\n\n"
 
@@ -271,6 +349,9 @@ class ForemanServer:
 
     async def run(self):
         """Run the MCP server."""
+        # Initialize backend before starting server
+        await self.initialize_backend()
+
         async with stdio_server() as (read_stream, write_stream):
             logger.info("Foreman MCP Server starting...")
             await self.server.run(
