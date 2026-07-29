@@ -11,6 +11,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    NEEDS_DECOMPOSITION = "needs_decomposition"  # SLM signals task is too complex
 
 
 class TaskDispatch(BaseModel):
@@ -36,6 +37,25 @@ class TaskDispatch(BaseModel):
     )
 
 
+class SuggestedSubtask(BaseModel):
+    """Suggested subtask when SLM requests decomposition."""
+    objective: str = Field(..., description="What this subtask should accomplish")
+    scope: Dict[str, List[str]] = Field(
+        ...,
+        description="Files for this subtask",
+        example={"editable": ["src/models.py"], "readonly": ["tests/"]}
+    )
+    rationale: str = Field(..., description="Why this subtask is needed")
+    requires: Optional[List[str]] = Field(
+        None,
+        description="Dependencies or shared interfaces needed"
+    )
+    estimated_complexity: Optional[str] = Field(
+        None,
+        description="Complexity estimate (low/medium/high)"
+    )
+
+
 class TaskReport(BaseModel):
     """Report from SLM back to orchestrator."""
     task_id: str = Field(..., description="Task identifier")
@@ -52,6 +72,15 @@ class TaskReport(BaseModel):
     error: Optional[str] = Field(
         None,
         description="Error message if task failed"
+    )
+    # Cooperative decomposition fields
+    suggested_subtasks: Optional[List[SuggestedSubtask]] = Field(
+        None,
+        description="Subtasks suggested when status is needs_decomposition"
+    )
+    decomposition_reasoning: Optional[str] = Field(
+        None,
+        description="Why the SLM thinks this task needs decomposition"
     )
 
 

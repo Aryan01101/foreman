@@ -145,6 +145,133 @@ For multiple independent tasks:
 3. Tasks with no overlap → dispatch in parallel
 4. Define shared interfaces upfront for dependent tasks
 
+## Cooperative Decomposition (Hybrid Pattern)
+
+When task complexity is uncertain, the SLM can signal it needs help by returning `status: "needs_decomposition"`.
+
+### Pattern 1: Preemptive Parallel Dispatch
+
+**Use when you can decompose upfront:**
+
+1. Analyze the request and identify independent slices
+2. Check file overlap between slices
+3. For non-overlapping slices: dispatch in parallel
+4. Define shared interfaces upfront for dependent slices
+5. Verify all results independently
+
+**Example:**
+```
+User: Add user management feature
+
+You decompose:
+- Task A: User model + migrations (models/user.py)
+- Task B: Auth endpoints (routes/auth.py)
+- Task C: User CRUD (routes/users.py)
+
+No file overlap → dispatch all 3 in parallel
+```
+
+### Pattern 2: Cooperative Decomposition
+
+**Use when complexity is uncertain:**
+
+1. Dispatch the task to SLM
+2. Monitor for `needs_decomposition` status
+3. **Review the suggested breakdown** - SLM proposes subtasks
+4. **Decide:**
+   - ✅ Accept: Validate suggestions, define interfaces, dispatch subtasks
+   - ⚠️ Modify: Refine the suggestions, then dispatch
+   - ❌ Reject: Take over the task yourself
+5. Verify all subtask results independently
+
+**Example workflow:**
+
+```json
+// Initial dispatch
+dispatch_task({
+  "task_id": "user-auth",
+  "objective": "Add full user authentication system",
+  "scope": {
+    "editable": ["routes/auth.py", "models/user.py", "middleware/"],
+    "readonly": ["tests/"]
+  },
+  "acceptance_criteria": [
+    "JWT token generation works",
+    "Password hashing uses bcrypt",
+    "All auth tests pass"
+  ]
+})
+
+// SLM realizes this is too complex
+report = get_report("user-auth")
+// report.status == "needs_decomposition"
+// report.suggested_subtasks = [
+//   {
+//     "objective": "Create User model with password hashing",
+//     "scope": {"editable": ["models/user.py"]},
+//     "rationale": "Foundation for auth system",
+//     "estimated_complexity": "medium"
+//   },
+//   {
+//     "objective": "Implement JWT token generation and validation",
+//     "scope": {"editable": ["utils/jwt.py"]},
+//     "rationale": "Separate concern from routes",
+//     "requires": ["User model interface"],
+//     "estimated_complexity": "medium"
+//   },
+//   {
+//     "objective": "Add /auth/register and /auth/login endpoints",
+//     "scope": {"editable": ["routes/auth.py"]},
+//     "rationale": "Wire up auth flow",
+//     "requires": ["User model", "JWT utilities"],
+//     "estimated_complexity": "low"
+//   }
+// ]
+// report.decomposition_reasoning = "Task touches 3 concerns with complex dependencies"
+
+// You review and decide
+if (validate_decomposition(report.suggested_subtasks)) {
+  // Define shared interfaces
+  interfaces = {
+    "User model": "class User with .hash_password() and .verify_password()",
+    "JWT utilities": "generate_token(user_id) and verify_token(token)"
+  }
+
+  // Dispatch subtasks with interface contracts
+  for (subtask in report.suggested_subtasks) {
+    dispatch_task({
+      "task_id": `user-auth-${subtask.objective}`,
+      "objective": subtask.objective,
+      "scope": subtask.scope,
+      "context_ref": interfaces,  // Shared interfaces
+      "acceptance_criteria": [...]
+    })
+  }
+
+  // Verify each independently
+  for (subtask_id in subtask_ids) {
+    result = get_report(subtask_id)
+    run_held_out_tests(result.diff)
+  }
+}
+```
+
+**Critical rules for cooperative decomposition:**
+
+1. **Never auto-accept suggestions** - Always review the breakdown
+2. **Define interfaces explicitly** - Don't let subtasks guess at contracts
+3. **Verify independently** - Each subtask gets held-out tests
+4. **You stay accountable** - If subtasks fail, you didn't decompose well enough
+
+### When to Use Which Pattern
+
+| Pattern | Use When | Don't Use When |
+|---------|----------|----------------|
+| **Preemptive** | Clear independent slices, known complexity | Uncertain what's involved |
+| **Cooperative** | Complex task, unclear scope, many dependencies | Simple task you can decompose easily |
+
+**Hybrid approach:** Start with Preemptive. If a slice is harder than expected, that slice can request Cooperative decomposition.
+
 ## Merge Strategy
 
 **Hybrid batching:**
